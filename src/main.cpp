@@ -1,5 +1,7 @@
 #include <torch/torch.h>
 #include <opencv2/opencv.hpp>
+#include <numeric>
+#include <random>
 #include <fstream>
 #include <iostream>
 #include <filesystem>
@@ -38,15 +40,57 @@ int main() {
             << images.size() << " images and "
             << labels.size() << " labels.\n";
 
-    auto dataset = SimpleDataset(images, labels)
+    // ---- 3) Train/Test split (600/100) ----
+    const int trainCount = 600;
+    const int testCount  = kNumSamples - trainCount; // 100
+
+    std::vector<int> indices(kNumSamples);
+    std::iota(indices.begin(), indices.end(), 0);
+
+    // Shuffle indices to randomize split (reproducible)
+    std::mt19937 rng(42);
+    std::shuffle(indices.begin(), indices.end(), rng);
+
+    std::vector<cv::Mat> trainImages, testImages;
+    std::vector<int64_t> trainLabels, testLabels;
+    trainImages.reserve(trainCount);
+    trainLabels.reserve(trainCount);
+    testImages.reserve(testCount);
+    testLabels.reserve(testCount);
+
+    for (int i = 0; i < kNumSamples; ++i) {
+        int idx = indices[i];
+        if (i < trainCount) {
+            trainImages.push_back(images[idx]);
+            trainLabels.push_back(labels[idx]);
+        } else {
+            testImages.push_back(images[idx]);
+            testLabels.push_back(labels[idx]);
+        }
+    }
+
+    std::cout << "Split: train=" << trainImages.size()
+            << ", test=" << testImages.size() << "\n";
+
+    // ---- 4) Datasets + DataLoaders ----
+    auto trainDataset = SimpleDataset(trainImages, trainLabels)
         .map(torch::data::transforms::Stack<>());
 
-    auto dataLoader = torch::data::make_data_loader<
+    auto testDataset = SimpleDataset(testImages, testLabels)
+        .map(torch::data::transforms::Stack<>());
+
+    auto trainLoader = torch::data::make_data_loader<
         torch::data::samplers::RandomSampler>(
-            std::move(dataset),
+            std::move(trainDataset),
             torch::data::DataLoaderOptions().batch_size(batchSize)
     );
 
+    auto testLoader = torch::data::make_data_loader(
+            std::move(testDataset),
+            torch::data::DataLoaderOptions().batch_size(batchSize)
+    );
+
+    // ---- 5) Create a model "Tiny CNN" ----
     TinyCNN model(10);
     model->to(device);
 
@@ -64,7 +108,7 @@ int main() {
         int64_t correct = 0;
         int64_t total = 0;
 
-        for (auto& batch : *dataLoader) {
+        for (auto& batch : *trainLoader) {
 
             auto x = batch.data.to(device);
             auto y = batch.target.to(device);
@@ -90,6 +134,31 @@ int main() {
                   << 100.0 * correct / total
                   << "%\n";
     }
+
+    // ---- 6) Final evaluation on test set ----
+    model->eval();
+    torch::NoGradGuard no_grad;
+
+    double testLoss = 0.0;
+    int64_t testCorrect = 0;
+    int64_t testTotal = 0;
+
+    for (auto& batch : *testLoader) {
+        auto x = batch.data.to(device);
+        auto y = batch.target.to(device);
+
+        auto logits = model->forward(x);
+        auto loss = criterion(logits, y);
+
+        testLoss += loss.item<double>() * x.size(0);
+
+        auto pred = logits.argmax(1);
+        testCorrect += pred.eq(y).sum().item<int64_t>();
+        testTotal += y.size(0);
+    }
+
+    std::cout << "TEST | Loss: " << (testLoss / testTotal)
+              << " | Accuracy: " << (100.0 * testCorrect / testTotal) << "%\n";
 
     return 0;
 }
