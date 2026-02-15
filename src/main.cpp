@@ -28,7 +28,9 @@ int main() {
     // Load real dataset (kNumSamples images + labels)
     // ------------------------------------------------------------------
 
-    const int kNumSamples = 700;
+    int testCount = 100;          // counts ONLY ORIGINAL samples
+    const int scale_factor = 10;  // consistent with cvMap (1..10)
+    const int kNumSamples = 7000; // Total number of samples (originals + augmented).
     const std::string imgDir = "../../cvMap/img/out/binning/";
     const std::string labelsPath = "../../cvMap/img/out/labels.txt";
 
@@ -41,70 +43,112 @@ int main() {
     std::cout << "Loaded "
             << images.size() << " images and "
             << labels.size() << " labels.\n";
-
-    // ---- 3) Train/Test split by blocks: 120 train + 20 test, repeated 5 times ----
-    const int trainBlock = 120;
-    const int testBlock  = 20;
-    const int blockSize  = trainBlock + testBlock; // 140
+    
+    // ---- 3) Train/Test split: TEST = last originals PER CLASS (uniform), TRAIN = everything else ----
+    const int blockSize = 2 * scale_factor;      // e.g. 20 when scale=10
+    const int originalsPerBlock = 2;             // always 2
 
     if (kNumSamples % blockSize != 0) {
-        throw std::runtime_error("kNumSamples must be a multiple of 140 for this split scheme.");
+        throw std::runtime_error("kNumSamples must be a multiple of (2*scale_factor).");
+    }
+    const int numBlocks = kNumSamples / blockSize;
+
+    // testCount counts ONLY ORIGINAL samples
+    if (testCount % 10 != 0) {
+        throw std::runtime_error("For uniform test over 10 classes, testCount must be a multiple of 10.");
+    }
+    const int perClass = testCount / 10;         // e.g. 10 per class
+
+    // Each block contributes exactly 2 originals: (even label, odd label) = a pair (0,1) or (2,3)...
+    // So perClass must be feasible given how many originals you have per class.
+    if (perClass % 1 != 0) {
+        // nothing to do; kept for clarity
     }
 
-    const int numBlocks = kNumSamples / blockSize; // 5 for 700
-    const int trainCount = numBlocks * trainBlock; // 600
-    const int testCount  = numBlocks * testBlock;  // 100
+    // We'll mark specific original indices to go to test: isTestOriginal[i] = true if sample i is an original in test.
+    std::vector<bool> isTestOriginal(kNumSamples, false);
 
-    std::vector<cv::Mat> trainImages, testImages;
-    std::vector<int64_t> trainLabels, testLabels;
-    trainImages.reserve(trainCount);
-    trainLabels.reserve(trainCount);
-    testImages.reserve(testCount);
-    testLabels.reserve(testCount);
+    // For each class c in 0..9, collect ALL original indices of that class (within=0 or 1 in each block)
+    std::vector<int> originalsIdxByClass[10];
 
-    // Fill train/test in the requested order
     for (int b = 0; b < numBlocks; ++b) {
         int start = b * blockSize;
 
-        // 120 train: [start .. start+119]
-        for (int i = 0; i < trainBlock; ++i) {
-            int idx = start + i;
-            trainImages.push_back(images[idx]);
-            trainLabels.push_back(labels[idx]);
-        }
+        // original 0
+        int l0 = static_cast<int>(labels[start + 0]);
+        if (l0 >= 0 && l0 < 10) originalsIdxByClass[l0].push_back(start + 0);
 
-        // 20 test: [start+120 .. start+139]
-        for (int i = 0; i < testBlock; ++i) {
-            int idx = start + trainBlock + i;
-            testImages.push_back(images[idx]);
-            testLabels.push_back(labels[idx]);
+        // original 1
+        int l1 = static_cast<int>(labels[start + 1]);
+        if (l1 >= 0 && l1 < 10) originalsIdxByClass[l1].push_back(start + 1);
+    }
+
+    // Take the LAST 'perClass' originals of each class into TEST
+    for (int c = 0; c < 10; ++c) {
+        auto& v = originalsIdxByClass[c];
+        if ((int)v.size() < perClass) {
+            throw std::runtime_error("Not enough originals for class " + std::to_string(c) +
+                                    " (need " + std::to_string(perClass) +
+                                    ", have " + std::to_string(v.size()) + ").");
+        }
+        for (int i = (int)v.size() - perClass; i < (int)v.size(); ++i) {
+            isTestOriginal[v[i]] = true;
         }
     }
 
-    // Shuffle train only (keep image/label alignment)
+    // Build TRAIN/TEST:
+    // - TEST: only samples i where isTestOriginal[i] == true (these are guaranteed to be originals)
+    // - TRAIN: everything else (including augmented samples, and originals not selected for test)
+    std::vector<cv::Mat> trainImages, testImages;
+    std::vector<int64_t> trainLabels, testLabels;
+
+    trainImages.reserve(kNumSamples - testCount);
+    trainLabels.reserve(kNumSamples - testCount);
+    testImages.reserve(testCount);
+    testLabels.reserve(testCount);
+
+    for (int i = 0; i < kNumSamples; ++i) {
+        if (isTestOriginal[i]) {
+            // sanity: ensure i is an original (within-block 0 or 1)
+            int within = i % blockSize;
+            if (within >= originalsPerBlock) {
+                throw std::runtime_error("Internal error: selected a non-original for test.");
+            }
+            testImages.push_back(images[i]);
+            testLabels.push_back(labels[i]);
+        } else {
+            trainImages.push_back(images[i]);
+            trainLabels.push_back(labels[i]);
+        }
+    }
+
+    // Shuffle TRAIN only (keep alignment)
     {
+        const int trainCount = (int)trainLabels.size();
         std::vector<int> perm(trainCount);
         std::iota(perm.begin(), perm.end(), 0);
 
         std::mt19937 rng(42);
         std::shuffle(perm.begin(), perm.end(), rng);
 
-        std::vector<cv::Mat> shuffledTrainImages;
-        std::vector<int64_t> shuffledTrainLabels;
-        shuffledTrainImages.reserve(trainCount);
-        shuffledTrainLabels.reserve(trainCount);
+        std::vector<cv::Mat> ti;
+        std::vector<int64_t> tl;
+        ti.reserve(trainCount);
+        tl.reserve(trainCount);
 
-        for (int j : perm) {
-            shuffledTrainImages.push_back(trainImages[j]);
-            shuffledTrainLabels.push_back(trainLabels[j]);
+        for (int p : perm) {
+            ti.push_back(trainImages[p]);
+            tl.push_back(trainLabels[p]);
         }
-
-        trainImages.swap(shuffledTrainImages);
-        trainLabels.swap(shuffledTrainLabels);
+        trainImages.swap(ti);
+        trainLabels.swap(tl);
     }
 
-    std::cout << "Split (blocked): train=" << trainImages.size()
-              << ", test=" << testImages.size() << "\n";
+    std::cout << "Split LAST-ORIGINALS-PER-CLASS (scale=" << scale_factor << "): "
+            << "train=" << trainImages.size()
+            << ", test(originals-only,uniform)=" << testImages.size()
+            << " (perClass=" << perClass
+            << ", blockSize=" << blockSize << ")\n";
 
     printLabelDistribution(trainLabels, "TRAIN");
     printLabelDistribution(testLabels, "TEST");
