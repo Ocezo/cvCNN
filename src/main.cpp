@@ -1,5 +1,6 @@
 #include <torch/torch.h>
 #include <opencv2/opencv.hpp>
+#include <array>
 #include <numeric>
 #include <random>
 #include <fstream>
@@ -11,6 +12,7 @@
 
 std::vector<int64_t> readLabels(const std::string& labelsPath, int kNumSamples);
 std::vector<cv::Mat> loadImages(const std::string& imgDir, int kNumSamples);
+void printLabelDistribution(const std::vector<int64_t>& labels, const std::string& name);
 
 int main() {
 
@@ -40,16 +42,18 @@ int main() {
             << images.size() << " images and "
             << labels.size() << " labels.\n";
 
-    // ---- 3) Train/Test split (600/100) ----
-    const int trainCount = 600;
-    const int testCount  = kNumSamples - trainCount; // 100
+    // ---- 3) Train/Test split by blocks: 120 train + 20 test, repeated 5 times ----
+    const int trainBlock = 120;
+    const int testBlock  = 20;
+    const int blockSize  = trainBlock + testBlock; // 140
 
-    std::vector<int> indices(kNumSamples);
-    std::iota(indices.begin(), indices.end(), 0);
+    if (kNumSamples % blockSize != 0) {
+        throw std::runtime_error("kNumSamples must be a multiple of 140 for this split scheme.");
+    }
 
-    // Shuffle indices to randomize split (reproducible)
-    std::mt19937 rng(42);
-    std::shuffle(indices.begin(), indices.end(), rng);
+    const int numBlocks = kNumSamples / blockSize; // 5 for 700
+    const int trainCount = numBlocks * trainBlock; // 600
+    const int testCount  = numBlocks * testBlock;  // 100
 
     std::vector<cv::Mat> trainImages, testImages;
     std::vector<int64_t> trainLabels, testLabels;
@@ -58,19 +62,52 @@ int main() {
     testImages.reserve(testCount);
     testLabels.reserve(testCount);
 
-    for (int i = 0; i < kNumSamples; ++i) {
-        int idx = indices[i];
-        if (i < trainCount) {
+    // Fill train/test in the requested order
+    for (int b = 0; b < numBlocks; ++b) {
+        int start = b * blockSize;
+
+        // 120 train: [start .. start+119]
+        for (int i = 0; i < trainBlock; ++i) {
+            int idx = start + i;
             trainImages.push_back(images[idx]);
             trainLabels.push_back(labels[idx]);
-        } else {
+        }
+
+        // 20 test: [start+120 .. start+139]
+        for (int i = 0; i < testBlock; ++i) {
+            int idx = start + trainBlock + i;
             testImages.push_back(images[idx]);
             testLabels.push_back(labels[idx]);
         }
     }
 
-    std::cout << "Split: train=" << trainImages.size()
-            << ", test=" << testImages.size() << "\n";
+    // Shuffle train only (keep image/label alignment)
+    {
+        std::vector<int> perm(trainCount);
+        std::iota(perm.begin(), perm.end(), 0);
+
+        std::mt19937 rng(42);
+        std::shuffle(perm.begin(), perm.end(), rng);
+
+        std::vector<cv::Mat> shuffledTrainImages;
+        std::vector<int64_t> shuffledTrainLabels;
+        shuffledTrainImages.reserve(trainCount);
+        shuffledTrainLabels.reserve(trainCount);
+
+        for (int j : perm) {
+            shuffledTrainImages.push_back(trainImages[j]);
+            shuffledTrainLabels.push_back(trainLabels[j]);
+        }
+
+        trainImages.swap(shuffledTrainImages);
+        trainLabels.swap(shuffledTrainLabels);
+    }
+
+    std::cout << "Split (blocked): train=" << trainImages.size()
+              << ", test=" << testImages.size() << "\n";
+
+    printLabelDistribution(trainLabels, "TRAIN");
+    printLabelDistribution(testLabels, "TEST");
 
     // ---- 4) Datasets + DataLoaders ----
     auto trainDataset = SimpleDataset(trainImages, trainLabels)
@@ -163,6 +200,10 @@ int main() {
     return 0;
 }
 
+//--------------------------------------------------------------    
+// Helper functions
+//--------------------------------------------------------------
+
 std::vector<int64_t> readLabels(const std::string& labelsPath, int kNumSamples) {
     std::vector<int64_t> labels;
     labels.reserve(kNumSamples);
@@ -207,4 +248,22 @@ std::vector<cv::Mat> loadImages(const std::string& imgDir, int kNumSamples) {
     }
 
     return images;
+}
+
+void printLabelDistribution(const std::vector<int64_t>& labels,
+                            const std::string& name) {
+
+    std::array<int, 10> counts{};
+    counts.fill(0);
+
+    for (auto l : labels) {
+        if (l >= 0 && l < 10)
+            counts[l]++;
+    }
+
+    std::cout << "Label distribution in " << name << ":\n";
+    for (int i = 0; i < 10; ++i) {
+        std::cout << " " << i << " : " << counts[i] << " /";
+    }
+    std::cout << "\n";
 }
