@@ -2,9 +2,10 @@
 #include <opencv2/opencv.hpp>
 #include <torch/torch.h>
 
-inline torch::Tensor cvMatToTensor16x16(const cv::Mat& img) {
+inline torch::Tensor cvMatToTensor(const cv::Mat& img, int res) {
 
-    CV_Assert(img.rows == 16 && img.cols == 16);
+    CV_Assert(res > 0);
+    CV_Assert(img.rows == res && img.cols == res);
     CV_Assert(img.type() == CV_8UC1);
 
     cv::Mat floatImg;
@@ -12,9 +13,13 @@ inline torch::Tensor cvMatToTensor16x16(const cv::Mat& img) {
 
     auto tensor = torch::from_blob(
         floatImg.data,
-        {1, 16, 16},
+        {1, res, res},
         torch::kFloat32
     ).clone(); // important!
 
-    return tensor; // [1,16,16]
+    return tensor; // [1,res,res]
+}
+
+inline torch::Tensor cvMatToTensor16x16(const cv::Mat& img) {
+    return cvMatToTensor(img, 16);
 }

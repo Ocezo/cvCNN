@@ -11,13 +11,14 @@
 #include "SimpleDataset.hpp"
 
 std::vector<int64_t> readLabels(const std::string& labelsPath, int kNumSamples);
-std::vector<cv::Mat> loadImages(const std::string& imgDir, int kNumSamples);
+std::vector<cv::Mat> loadImages(const std::string& imgDir, int kNumSamples, int inputRes);
 void printLabelDistribution(const std::vector<int64_t>& labels, const std::string& name);
+void printKernels1(const TinyCNN& model, const std::string& outputPath);
 
 int main() {
-
-    const int epochs = 30;
-    const int batchSize = 64;
+    const int res = 16;        // image resolution (res x res), consistent with cvMap
+    const int epochs = 30;     // number of training epochs
+    const int batchSize = 64;  // training batch size
 
     torch::Device device(torch::cuda::is_available() ?
                          torch::kCUDA : torch::kCPU);
@@ -38,7 +39,7 @@ int main() {
     std::vector<int64_t> labels = readLabels(labelsPath, kNumSamples);
 
     // ---- 2) Load images roi_nxn_i.jpg ----
-    std::vector<cv::Mat> images = loadImages(imgDir, kNumSamples);
+    std::vector<cv::Mat> images = loadImages(imgDir, kNumSamples, res);
 
     std::cout << "Loaded "
             << images.size() << " images and "
@@ -154,10 +155,10 @@ int main() {
     printLabelDistribution(testLabels, "TEST");
 
     // ---- 4) Datasets + DataLoaders ----
-    auto trainDataset = SimpleDataset(trainImages, trainLabels)
+    auto trainDataset = SimpleDataset(trainImages, trainLabels, res)
         .map(torch::data::transforms::Stack<>());
 
-    auto testDataset = SimpleDataset(testImages, testLabels)
+    auto testDataset = SimpleDataset(testImages, testLabels, res)
         .map(torch::data::transforms::Stack<>());
 
     auto trainLoader = torch::data::make_data_loader<
@@ -172,7 +173,7 @@ int main() {
     );
 
     // ---- 5) Create a model "Tiny CNN" ----
-    TinyCNN model(10);
+    TinyCNN model(10, res);
     model->to(device);
 
     torch::optim::Adam optimizer(
@@ -241,6 +242,9 @@ int main() {
     std::cout << "TEST | Loss: " << (testLoss / testTotal)
               << " | Accuracy: " << (100.0 * testCorrect / testTotal) << "%\n";
 
+    // ---- 7) Visualize conv1 kernels ----
+    printKernels1(model, "../img/kernels_conv1.png");
+
     return 0;
 }
 
@@ -271,7 +275,7 @@ std::vector<int64_t> readLabels(const std::string& labelsPath, int kNumSamples) 
     return labels;
 }
 
-std::vector<cv::Mat> loadImages(const std::string& imgDir, int kNumSamples) {
+std::vector<cv::Mat> loadImages(const std::string& imgDir, int kNumSamples, int inputRes) {
     std::vector<cv::Mat> images;
     images.reserve(kNumSamples);
 
@@ -284,8 +288,8 @@ std::vector<cv::Mat> loadImages(const std::string& imgDir, int kNumSamples) {
             throw std::runtime_error("Failed to load image: " + path);
         }
 
-        if (img.rows != 16 || img.cols != 16) {
-            cv::resize(img, img, cv::Size(16, 16), 0, 0, cv::INTER_NEAREST);
+        if (img.rows != inputRes || img.cols != inputRes) {
+            cv::resize(img, img, cv::Size(inputRes, inputRes), 0, 0, cv::INTER_NEAREST);
         }
 
         images.push_back(img);
@@ -310,4 +314,109 @@ void printLabelDistribution(const std::vector<int64_t>& labels,
         std::cout << " " << i << " : " << counts[i] << " /";
     }
     std::cout << "\n";
+}
+
+// ------------------------------------------------------------
+// Save conv1 3x3 kernels as a 4x4 image grid
+// ------------------------------------------------------------
+void printKernels1(const TinyCNN& model,
+                   const std::string& outputPath = "kernels_conv1.png")
+{
+    // conv1 weights: [out_channels, in_channels, kH, kW]
+    // Here: [16, 1, 3, 3]
+    auto w = model->conv1->weight.detach();  // already CPU in your case
+
+    const int outC = static_cast<int>(w.size(0));
+    const int kH   = static_cast<int>(w.size(2));
+    const int kW   = static_cast<int>(w.size(3));
+
+    std::cout << "Saving conv1 kernels (" 
+              << outC << " filters of size "
+              << kH << "x" << kW << ")...\n";
+
+    std::vector<cv::Mat> tiles;
+    tiles.reserve(outC);
+
+    float globalMin = +1e30f;
+    float globalMax = -1e30f;
+
+    // ------------------------------------------------------------
+    // 1) Compute global min/max for consistent normalization
+    // ------------------------------------------------------------
+    for (int oc = 0; oc < outC; ++oc) {
+        auto kernel = w[oc][0]; // since in_channels = 1
+        for (int i = 0; i < kH; ++i)
+            for (int j = 0; j < kW; ++j) {
+                float v = kernel[i][j].item<float>();
+                globalMin = std::min(globalMin, v);
+                globalMax = std::max(globalMax, v);
+            }
+    }
+
+    float denom = globalMax - globalMin;
+    if (denom < 1e-12f)
+        denom = 1.0f;
+
+    // ------------------------------------------------------------
+    // 2) Convert each kernel to a visible 8-bit image
+    // ------------------------------------------------------------
+    for (int oc = 0; oc < outC; ++oc) {
+
+        cv::Mat tile(kH, kW, CV_8UC1);
+
+        auto kernel = w[oc][0];
+
+        for (int i = 0; i < kH; ++i) {
+            for (int j = 0; j < kW; ++j) {
+
+                float v = kernel[i][j].item<float>();
+
+                // Normalize to [0,1]
+                float n = (v - globalMin) / denom;
+
+                // Scale to [0,255]
+                int pix = static_cast<int>(std::round(255.0f * n));
+                pix = std::clamp(pix, 0, 255);
+
+                tile.at<uint8_t>(i, j) = static_cast<uint8_t>(pix);
+            }
+        }
+
+        // Enlarge for visibility (scale x40)
+        cv::Mat big;
+        cv::resize(tile, big, cv::Size(), 40, 40, cv::INTER_NEAREST);
+
+        tiles.push_back(big);
+    }
+
+    // ------------------------------------------------------------
+    // 3) Build 4x4 grid
+    // ------------------------------------------------------------
+    const int gridSize = 4; // 4x4 for 16 filters
+
+    int tileH = tiles[0].rows;
+    int tileW = tiles[0].cols;
+
+    cv::Mat gridImg(gridSize * tileH,
+                    gridSize * tileW,
+                    CV_8UC1,
+                    cv::Scalar(0));
+
+    for (int idx = 0; idx < outC; ++idx) {
+
+        int r = idx / gridSize;
+        int c = idx % gridSize;
+
+        tiles[idx].copyTo(
+            gridImg(cv::Rect(c * tileW,
+                             r * tileH,
+                             tileW,
+                             tileH))
+        );
+    }
+
+    cv::imwrite(outputPath, gridImg);
+
+    std::cout << "Saved kernel visualization to: "
+              << outputPath << std::endl;
 }
