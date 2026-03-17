@@ -48,7 +48,7 @@ The current `CMakeLists.txt` expects LibTorch to be available at:
 /opt/libtorch
 ```
 
-If your LibTorch installation is elsewhere, update `Torch_DIR` in [CMakeLists.txt](/home/t0/Documents/Jean-Marc/repos/cvCNN/CMakeLists.txt).
+If your LibTorch installation is elsewhere, update `Torch_DIR` in [CMakeLists.txt](https://github.com/Ocezo/cvCNN/blob/master/CMakeLists.txt).
 
 ## Build
 
