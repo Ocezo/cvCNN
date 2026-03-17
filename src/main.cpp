@@ -16,7 +16,7 @@ void printLabelDistribution(const std::vector<int64_t>& labels, const std::strin
 void printKernels1(const TinyCNN& model, const std::string& outputPath);
 
 int main() {
-    const int res = 16;        // image resolution (res x res), consistent with cvMap
+    const int res = 32;        // image resolution (res x res), consistent with cvData
     const int epochs = 30;     // number of training epochs
     const int batchSize = 64;  // training batch size
 
@@ -30,10 +30,10 @@ int main() {
     // ------------------------------------------------------------------
 
     int testCount = 100;          // counts ONLY ORIGINAL samples
-    const int scale_factor = 10;  // consistent with cvMap (1..10)
+    const int scale_factor = 10;  // consistent with cvData (1..10)
     const int kNumSamples = 7000; // Total number of samples (originals + augmented).
-    const std::string imgDir = "../../cvMap/img/out/binning/";
-    const std::string labelsPath = "../../cvMap/img/out/labels.txt";
+    const std::string imgDir = "../../cvData/img/out/binning/";
+    const std::string labelsPath = "../../cvData/img/out/labels.txt";
 
     // ---- 1) Read labels.txt ----
     std::vector<int64_t> labels = readLabels(labelsPath, kNumSamples);
@@ -210,10 +210,10 @@ int main() {
             total += y.size(0);
         }
 
-        std::cout << "Epoch " << epoch
-                  << " | Loss: " << runningLoss / total
-                  << " | Accuracy: "
-                  << 100.0 * correct / total
+        std::cout << "Epoch "
+                  << std::setw(2) << epoch
+                  << " | Loss: " << std::fixed << std::setprecision(8) << (runningLoss / total)
+                  << " | Accuracy: " << std::setw(8) << std::setprecision(4) << 100.0 * correct / total
                   << "%\n";
     }
 
@@ -239,8 +239,8 @@ int main() {
         testTotal += y.size(0);
     }
 
-    std::cout << "TEST | Loss: " << (testLoss / testTotal)
-              << " | Accuracy: " << (100.0 * testCorrect / testTotal) << "%\n";
+    std::cout << "TEST  => | Loss: " << std::fixed << std::setprecision(8) << (testLoss / testTotal)
+              << " | Accuracy: " << std::setw(8) << std::setprecision(4) << (100.0 * testCorrect / testTotal) << "%\n";
 
     // ---- 7) Visualize conv1 kernels ----
     printKernels1(model, "../img/kernels_conv1.png");

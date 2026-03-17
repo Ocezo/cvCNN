@@ -8,10 +8,12 @@ find_package(OpenCV REQUIRED)
 set(Torch_DIR "/opt/libtorch/share/cmake/Torch")
 find_package(Torch REQUIRED)
 
-include_directories(include)
-
 add_executable(cvCNN
     src/main.cpp
+)
+
+target_include_directories(cvCNN PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
 )
 
 target_link_libraries(cvCNN PRIVATE
@@ -19,7 +21,9 @@ target_link_libraries(cvCNN PRIVATE
     ${TORCH_LIBRARIES}
 )
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
+target_compile_options(cvCNN PRIVATE
+    ${TORCH_CXX_FLAGS}
+)
 
 set_target_properties(cvCNN PROPERTIES
     BUILD_RPATH "/opt/libtorch/lib"
